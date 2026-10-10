@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
@@ -9,6 +9,24 @@ import type { InvoiceWithClient } from "@/types/domain";
 import { formatMoney, formatDate } from "@/lib/format";
 import { RiskBadge, StatusBadge } from "./Badge";
 
+/** AG Grid ships separate light/dark theme CSS and doesn't read the
+ *  Tailwind `dark:` variants — without this it stays permanently
+ *  light-themed even when the rest of the dashboard follows the system's
+ *  dark mode preference. */
+function usePrefersDark(): boolean {
+  const [prefersDark, setPrefersDark] = useState(false);
+
+  useEffect(() => {
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    setPrefersDark(mql.matches);
+    const listener = (e: MediaQueryListEvent) => setPrefersDark(e.matches);
+    mql.addEventListener("change", listener);
+    return () => mql.removeEventListener("change", listener);
+  }, []);
+
+  return prefersDark;
+}
+
 interface Props {
   invoices: InvoiceWithClient[];
   busy: boolean;
@@ -16,6 +34,7 @@ interface Props {
 }
 
 export function InvoiceGrid({ invoices, busy, onSimulatePay }: Props) {
+  const prefersDark = usePrefersDark();
   const columnDefs = useMemo<ColDef<InvoiceWithClient>[]>(
     () => [
       { field: "number", headerName: "Invoice", width: 120, pinned: "left" },
@@ -79,7 +98,10 @@ export function InvoiceGrid({ invoices, busy, onSimulatePay }: Props) {
   );
 
   return (
-    <div className="ag-theme-quartz h-[420px] w-full rounded-xl overflow-hidden" style={{ ["--ag-font-family" as string]: "inherit" }}>
+    <div
+      className={`${prefersDark ? "ag-theme-quartz-dark" : "ag-theme-quartz"} h-[420px] w-full rounded-xl overflow-hidden`}
+      style={{ ["--ag-font-family" as string]: "inherit" }}
+    >
       <AgGridReact<InvoiceWithClient>
         rowData={invoices}
         columnDefs={columnDefs}

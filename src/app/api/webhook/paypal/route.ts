@@ -15,7 +15,15 @@ const PAID_EVENT_TYPES = new Set(["INVOICING.INVOICE.PAID", "PAYMENT.CAPTURE.COM
  */
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
-  const event = JSON.parse(rawBody);
+  // PayPal webhook payloads vary by event type and aren't worth fully typing
+  // for a dev/demo receiver — every field below is read defensively.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let event: any;
+  try {
+    event = JSON.parse(rawBody);
+  } catch {
+    return NextResponse.json({ ok: false, error: "invalid JSON body" }, { status: 400 });
+  }
 
   if (paypalWebhooksEnabled()) {
     const verified = await verifyWebhookSignature({
@@ -36,16 +44,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: true });
   }
 
-  const paypalInvoiceId: string | undefined =
-    event.resource?.id ?? event.resource?.invoice_id ?? event.resource?.supplementary_data?.related_ids?.invoice_id;
+  // Different event types surface the invoice reference under different
+  // keys — the resource's own id for INVOICING.INVOICE.PAID, or a related-id
+  // back-reference (by either PayPal's internal id or the human-readable
+  // invoice number) for PAYMENT.CAPTURE.COMPLETED.
+  const paypalInvoiceId: string | undefined = event.resource?.id;
+  const relatedInvoiceId: string | undefined =
+    event.resource?.invoice_id ?? event.resource?.supplementary_data?.related_ids?.invoice_id;
 
-  if (!paypalInvoiceId) {
-    return NextResponse.json({ ok: false, error: "no invoice id on event" }, { status: 400 });
+  if (!paypalInvoiceId && !relatedInvoiceId) {
+    return NextResponse.json({ ok: false, error: "no invoice reference on event" }, { status: 400 });
   }
 
-  const invoice = getDb()
-    .prepare(`SELECT * FROM invoices WHERE paypal_invoice_id = ?`)
-    .get(paypalInvoiceId) as Invoice | undefined;
+  const db = getDb();
+  const invoice =
+    (paypalInvoiceId &&
+      (db.prepare(`SELECT * FROM invoices WHERE paypal_invoice_id = ?`).get(paypalInvoiceId) as Invoice | undefined)) ||
+    (relatedInvoiceId &&
+      ((db.prepare(`SELECT * FROM invoices WHERE paypal_invoice_id = ?`).get(relatedInvoiceId) as Invoice | undefined) ??
+        (db.prepare(`SELECT * FROM invoices WHERE paypal_invoice_number = ?`).get(relatedInvoiceId) as
+          | Invoice
+          | undefined)));
 
   if (!invoice) {
     return NextResponse.json({ ok: false, error: "no matching invoice" }, { status: 404 });

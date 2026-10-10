@@ -128,7 +128,24 @@ async function processInvoice(invoice: InvoiceWithClient, today: Date): Promise<
     detail: risk.factors,
   });
 
-  // Step 3 — decide: negotiate a discount, or nudge for payment.
+  // Step 3 — if a discount offer is already outstanding and hasn't expired
+  // yet, give it time to land instead of immediately burying it under a
+  // plain reminder on the very next cycle.
+  if (invoice.status === "DISCOUNT_OFFERED" && invoice.discount_expires_at) {
+    const expired = differenceInCalendarDays(new Date(invoice.discount_expires_at), today) < 0;
+    if (!expired) {
+      return {
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.number,
+        clientName: client.name,
+        action: "NO_ACTION",
+        riskScore: risk.score,
+        detail: `Waiting on the outstanding ${((invoice.discount_offered_pct ?? 0) * 100).toFixed(1)}% discount offer (expires ${invoice.discount_expires_at}) before following up again.`,
+      };
+    }
+  }
+
+  // Step 4 — decide: negotiate a (new) discount, or nudge for payment.
   const discount = decideDiscount(invoice, risk, today);
 
   if (discount.offer && discount.pct && discount.expiresAt) {
@@ -165,7 +182,7 @@ async function processInvoice(invoice: InvoiceWithClient, today: Date): Promise<
     };
   }
 
-  // Step 4 — otherwise, send/escalate a reminder.
+  // Step 5 — otherwise, send/escalate a reminder.
   const daysUntilDue = differenceInCalendarDays(new Date(invoice.due_date), today);
   const shouldRemind = daysUntilDue <= 3; // within reminder window or already overdue
 
@@ -212,6 +229,7 @@ export interface PaymentReceivedResult {
   invoiceId: string;
   amountCents: number;
   allocations: Array<{ potKey: string; potName: string; amountCents: number; simulated: boolean }>;
+  alreadyProcessed?: boolean;
 }
 
 /**
@@ -220,10 +238,26 @@ export interface PaymentReceivedResult {
  * commerce": the agent doesn't just wait for a human to decide what to do
  * with the cash — it immediately re-distributes it across pots via real
  * PayPal Payouts.
+ *
+ * Idempotent by design: PayPal explicitly documents webhooks as
+ * at-least-once delivery, and the /api/simulate/pay dev endpoint can be
+ * double-clicked. Re-processing an already-PAID invoice would silently
+ * double-credit every pot and fire a second real Payouts batch, so an
+ * invoice that isn't still "open" short-circuits here instead.
  */
 export async function handlePaymentReceived(invoiceId: string): Promise<PaymentReceivedResult> {
   const invoice = getInvoiceOrThrow(invoiceId);
   const client = getClient(invoice.client_id)!;
+
+  if (invoice.status === "PAID" || invoice.status === "CANCELLED") {
+    logActivity({
+      type: "INVOICE_PAID",
+      client_id: client.id,
+      invoice_id: invoice.id,
+      summary: `${invoice.number}: duplicate payment event ignored (invoice already ${invoice.status.toLowerCase()}).`,
+    });
+    return { invoiceId: invoice.id, amountCents: invoice.amount_cents, allocations: [], alreadyProcessed: true };
+  }
 
   updateInvoice(invoice.id, { status: "PAID", paid_date: new Date().toISOString().slice(0, 10) });
   logActivity({

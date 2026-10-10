@@ -97,8 +97,15 @@ export function useDashboardData() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ invoiceId }),
         });
-        const json = (await res.json()) as { ok: boolean; error?: string };
+        const json = (await res.json()) as {
+          ok: boolean;
+          error?: string;
+          result?: { alreadyProcessed?: boolean };
+        };
         if (!json.ok) throw new Error(json.error ?? "Payment simulation failed");
+        if (json.result?.alreadyProcessed) {
+          return `${invoiceNumber} was already marked paid — no duplicate payout sent.`;
+        }
         return `Payment for ${invoiceNumber} received — cash auto-split across pots.`;
       }),
     [withBusy]
